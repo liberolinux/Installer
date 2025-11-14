@@ -7,7 +7,6 @@ static WINDOW *status_win = NULL;
 
 static void draw_header(const char *title, const char *subtitle)
 {
-    int width = COLS - 2;
     mvhline(0, 0, ' ', COLS);
     mvprintw(0, 2, "%s", title ? title : INSTALLER_NAME);
     if (subtitle) {

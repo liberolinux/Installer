@@ -55,7 +55,12 @@ static NetInterface *list_interfaces(size_t *count)
             items = tmp;
         }
 
-        snprintf(items[n].name, sizeof(items[n].name), "%s", entry->d_name);
+        size_t name_len = strlen(entry->d_name);
+        if (name_len >= sizeof(items[n].name)) {
+            log_error("Skipping interface with long name: %s", entry->d_name);
+            continue;
+        }
+        memcpy(items[n].name, entry->d_name, name_len + 1);
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "/sys/class/net/%s/address", entry->d_name);
         read_file_trim(path, items[n].mac, sizeof(items[n].mac));

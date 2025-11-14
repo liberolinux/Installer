@@ -51,6 +51,74 @@ static void trim_whitespace(char *s)
     }
 }
 
+static bool copy_string_checked(char *dest, size_t dest_len, const char *src)
+{
+    if (!dest || dest_len == 0) {
+        return false;
+    }
+    if (!src) {
+        dest[0] = '\0';
+        return true;
+    }
+
+    size_t src_len = strlen(src);
+    if (src_len >= dest_len) {
+        memcpy(dest, src, dest_len - 1);
+        dest[dest_len - 1] = '\0';
+        return false;
+    }
+
+    memcpy(dest, src, src_len + 1);
+    return true;
+}
+
+static bool copy_with_ellipsis(char *dest, size_t dest_len, const char *src)
+{
+    if (!dest || dest_len == 0) {
+        return false;
+    }
+    if (!src) {
+        dest[0] = '\0';
+        return true;
+    }
+
+    size_t src_len = strlen(src);
+    if (src_len < dest_len) {
+        memcpy(dest, src, src_len + 1);
+        return true;
+    }
+
+    if (dest_len < 4) {
+        dest[0] = '\0';
+        return false;
+    }
+
+    size_t keep = dest_len - 4;
+    memcpy(dest, src, keep);
+    memcpy(dest + keep, "...", 4);
+    return false;
+}
+
+static int join_path(char *dest, size_t dest_len, const char *base, const char *suffix)
+{
+    if (!dest || dest_len == 0 || !base || !suffix) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    size_t base_len = strlen(base);
+    size_t suffix_len = strlen(suffix);
+    if (base_len + suffix_len >= dest_len) {
+        errno = ENAMETOOLONG;
+        log_error("Path too long: %s%s", base, suffix);
+        return -1;
+    }
+
+    memcpy(dest, base, base_len);
+    memcpy(dest + base_len, suffix, suffix_len + 1);
+    return 0;
+}
+
 static DiskInfo *collect_disks(size_t *out_count)
 {
     DIR *dir = opendir("/sys/block");
@@ -111,7 +179,10 @@ static DiskInfo *collect_disks(size_t *out_count)
             disks = tmp;
         }
 
-        snprintf(disks[count].name, sizeof(disks[count].name), "%s", entry->d_name);
+        if (!copy_string_checked(disks[count].name, sizeof(disks[count].name), entry->d_name)) {
+            log_error("Skipping disk with long name: %s", entry->d_name);
+            continue;
+        }
         snprintf(disks[count].path, sizeof(disks[count].path), "/dev/%s", entry->d_name);
         snprintf(disks[count].model, sizeof(disks[count].model), "%s", model);
         disks[count].size_mb = size_mb;
@@ -355,7 +426,9 @@ static int mount_partitions(InstallerState *state)
     }
 
     char boot_mount[PATH_MAX];
-    snprintf(boot_mount, sizeof(boot_mount), "%s/boot", state->install_root);
+    if (join_path(boot_mount, sizeof(boot_mount), state->install_root, "/boot") != 0) {
+        return -1;
+    }
     if (ensure_directory(boot_mount, 0755) != 0) {
         return -1;
     }
@@ -365,7 +438,9 @@ static int mount_partitions(InstallerState *state)
 
     if (state->boot_mode == BOOTMODE_UEFI) {
         char efi_mount[PATH_MAX];
-        snprintf(efi_mount, sizeof(efi_mount), "%s/boot/efi", state->install_root);
+        if (join_path(efi_mount, sizeof(efi_mount), state->install_root, "/boot/efi") != 0) {
+            return -1;
+        }
         if (mount_fs(state->efi_partition, efi_mount, "vfat", "defaults,umask=0077") != 0) {
             return -1;
         }
@@ -510,9 +585,12 @@ int disk_workflow(InstallerState *state)
 {
     while (1) {
         char subtitle[256];
+        char disk_display[64];
+        const char *disk_value = state->target_disk[0] ? state->target_disk : "<not set>";
+        copy_with_ellipsis(disk_display, sizeof(disk_display), disk_value);
         snprintf(subtitle, sizeof(subtitle),
                  "Disk: %s | Mode: %s | FS: %s | Swap: %ld MB | LUKS: %s | LVM: %s",
-                 state->target_disk[0] ? state->target_disk : "<not set>",
+                 disk_display,
                  boot_mode_to_string(state->boot_mode),
                  fs_to_string(state->root_fs),
                  state->swap_size_mb,

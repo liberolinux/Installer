@@ -173,9 +173,14 @@ int run_command_chroot(const char *root, const char *fmt, ...)
         return -1;
     }
 
-    char full[MAX_CMD_LEN];
-    snprintf(full, sizeof(full), "chroot %s /bin/bash -lc '%s'", root, escaped);
-    return run_command("%s", full);
+    const size_t overhead = strlen("chroot ") + strlen(" /bin/bash -lc '") + strlen("'") + 1;
+    size_t needed = strlen(root) + strlen(escaped) + overhead;
+    if (needed >= MAX_CMD_LEN) {
+        log_error("Chroot command too long for buffer");
+        return -1;
+    }
+
+    return run_command("chroot %s /bin/bash -lc '%s'", root, escaped);
 }
 
 int chroot_run_script(const char *root, const char *script_body)
