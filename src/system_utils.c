@@ -5,6 +5,7 @@
 #include <sys/wait.h>
 
 #include "log.h"
+#include "ui.h"
 
 static int mkdir_p(const char *path, mode_t mode)
 {
@@ -87,6 +88,32 @@ int capture_command(const char *cmd, char *output, size_t output_len)
     return status;
 }
 
+static void shorten_for_display(const char *input, char *output, size_t output_len)
+{
+    if (!output || output_len == 0) {
+        return;
+    }
+    if (!input) {
+        output[0] = '\0';
+        return;
+    }
+
+    size_t len = strlen(input);
+    if (len < output_len) {
+        memcpy(output, input, len + 1);
+        return;
+    }
+
+    if (output_len < 4) {
+        output[0] = '\0';
+        return;
+    }
+
+    size_t keep = output_len - 4;
+    memcpy(output, input, keep);
+    memcpy(output + keep, "...", 4);
+}
+
 static int run_formatted_command(char *buffer, size_t buffer_len, const char *fmt, va_list args)
 {
     if (vsnprintf(buffer, buffer_len, fmt, args) >= (int)buffer_len) {
@@ -111,22 +138,46 @@ static int run_formatted_command(char *buffer, size_t buffer_len, const char *fm
         }
     }
 
-    int rc = system(cmd_with_redirection);
-    if (rc == -1) {
-        log_error("system() failed for %s: %s", buffer, strerror(errno));
+    pid_t pid = fork();
+    if (pid < 0) {
+        log_error("fork() failed for %s: %s", buffer, strerror(errno));
         return -1;
     }
 
-    if (WIFEXITED(rc)) {
-        int code = WEXITSTATUS(rc);
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", cmd_with_redirection, (char *)NULL);
+        _exit(127);
+    }
+
+    char display_cmd[96];
+    shorten_for_display(buffer, display_cmd, sizeof(display_cmd));
+
+    int status = ui_wait_for_process("Running command", display_cmd, pid);
+    if (status < 0) {
+        int saved_errno = errno;
+        log_error("Failed to wait for %s: %s", buffer, strerror(saved_errno));
+        ui_error("Command Failed", "Unable to monitor child process. Check the installer log.");
+        return -1;
+    }
+
+    if (WIFEXITED(status)) {
+        int code = WEXITSTATUS(status);
         if (code != 0) {
             log_error("Command '%s' exited with %d", buffer, code);
+            char message[256];
+            snprintf(message, sizeof(message), "'%s' failed (exit %d). See log: %s", display_cmd, code, log_get_path());
+            ui_error("Command Failed", message);
             return -code;
         }
         return 0;
     }
 
-    log_error("Command '%s' terminated abnormally", buffer);
+    if (WIFSIGNALED(status)) {
+        log_error("Command '%s' terminated by signal %d", buffer, WTERMSIG(status));
+    } else {
+        log_error("Command '%s' terminated abnormally", buffer);
+    }
+    ui_error("Command Failed", "Process terminated unexpectedly. See the installer log for details.");
     return -1;
 }
 

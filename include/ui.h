@@ -13,6 +13,8 @@ int ui_menu(const char *title,
             const char **items,
             size_t count,
             int selected);
+void ui_error(const char *title, const char *message);
+int ui_wait_for_process(const char *title, const char *message, pid_t pid);
 int ui_prompt_input(const char *title,
                     const char *prompt,
                     char *buffer,

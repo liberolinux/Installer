@@ -1,4 +1,5 @@
 #include <ncurses.h>
+#include <sys/wait.h>
 
 #include "ui.h"
 
@@ -190,6 +191,64 @@ static void draw_header(const char *title, const char *subtitle)
     }
 }
 
+static void draw_progress_bar(int row, int col, int width, int percent)
+{
+    if (!main_win || width < 4) {
+        return;
+    }
+
+    int inner = width - 2;
+    if (inner <= 0) {
+        return;
+    }
+    int filled = (percent * inner) / 100;
+    mvwaddch(main_win, row, col, '[');
+    for (int i = 0; i < inner; ++i) {
+        waddch(main_win, (i < filled) ? '=' : ' ');
+    }
+    waddch(main_win, ']');
+}
+
+static void draw_loading_frame(const char *title, const char *message, int percent, char spinner)
+{
+    if (!ui_begin_frame()) {
+        return;
+    }
+
+    draw_header(title ? title : INSTALLER_NAME, NULL);
+
+    int msg_row = clamp_row(4);
+    mvwprintw(main_win, msg_row, clamp_col(2), "%s", message ? message : "Working...");
+
+    int bar_row = clamp_row(msg_row + 2);
+    int bar_col = clamp_col(2);
+    int bar_width = layout_width - 4;
+    int max_available = layout_width - bar_col - 1;
+    if (bar_width > max_available) {
+        bar_width = max_available;
+    }
+    if (bar_width < 8) {
+        bar_width = max_available;
+    }
+    if (bar_width < 4) {
+        wrefresh(main_win);
+        return;
+    }
+
+    wattron(main_win, COLOR_PAIR(1));
+    draw_progress_bar(bar_row, bar_col, bar_width, percent);
+    wattroff(main_win, COLOR_PAIR(1));
+
+    mvwprintw(main_win,
+              clamp_row(bar_row + 1),
+              bar_col,
+              "%3d%% %c",
+              percent,
+              spinner);
+
+    wrefresh(main_win);
+}
+
 static int wait_for_keypress(void)
 {
     WINDOW *win = main_win ? main_win : stdscr;
@@ -229,6 +288,7 @@ int ui_init(void)
     use_default_colors();
     init_pair(1, COLOR_CYAN, -1);
     init_pair(2, COLOR_YELLOW, -1);
+    init_pair(3, COLOR_RED, -1);
 
     g_ui_ready = true;
     ui_relayout();
@@ -277,20 +337,37 @@ void ui_status(const char *message)
     wrefresh(status_win);
 }
 
-void ui_message(const char *title, const char *message)
+static void show_modal_message(const char *title, const char *message, int color_pair)
 {
     if (!g_ui_ready) {
-        printf("%s\n", message ? message : "");
+        FILE *out = (color_pair > 0) ? stderr : stdout;
+        if (title && message) {
+            fprintf(out, "%s: %s\n", title, message);
+        } else if (message) {
+            fprintf(out, "%s\n", message);
+        } else if (title) {
+            fprintf(out, "%s\n", title);
+        }
         return;
     }
+
     while (1) {
         if (!ui_begin_frame()) {
-            printf("%s\n", message ? message : "");
+            FILE *out = (color_pair > 0) ? stderr : stdout;
+            if (message) {
+                fprintf(out, "%s\n", message);
+            }
             return;
         }
         draw_header(title ? title : INSTALLER_NAME, NULL);
         int message_row = clamp_row(4);
+        if (color_pair > 0) {
+            wattron(main_win, COLOR_PAIR(color_pair) | A_BOLD);
+        }
         mvwprintw(main_win, message_row, clamp_col(2), "%s", message ? message : "");
+        if (color_pair > 0) {
+            wattroff(main_win, COLOR_PAIR(color_pair) | A_BOLD);
+        }
 
         int prompt_row = clamp_row(layout_height - 2);
         if (prompt_row <= message_row) {
@@ -306,6 +383,58 @@ void ui_message(const char *title, const char *message)
         }
         break;
     }
+}
+
+void ui_message(const char *title, const char *message)
+{
+    show_modal_message(title, message, 0);
+}
+
+void ui_error(const char *title, const char *message)
+{
+    show_modal_message(title ? title : "Error", message, 3);
+}
+
+int ui_wait_for_process(const char *title, const char *message, pid_t pid)
+{
+    if (pid <= 0) {
+        return -1;
+    }
+
+    int status = 0;
+    int percent = 0;
+    const char spinner[] = "|/-\\";
+    int spinner_idx = 0;
+    bool interactive = ui_layout_ready();
+    struct timespec sleep_time = {.tv_sec = 0, .tv_nsec = 120 * 1000000};
+    int wait_flags = interactive ? WNOHANG : 0;
+
+    while (1) {
+        pid_t res = waitpid(pid, &status, wait_flags);
+        if (res == 0) {
+            percent = (percent + 3);
+            if (percent > 92) {
+                percent = 65 + (percent % 30);
+            }
+            draw_loading_frame(title, message, percent, spinner[spinner_idx++ % 4]);
+            nanosleep(&sleep_time, NULL);
+            continue;
+        }
+        if (res < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        break;
+    }
+
+    if (interactive) {
+        draw_loading_frame(title, message, 100, ' ');
+        napms(120);
+    }
+
+    return status;
 }
 
 bool ui_confirm(const char *title, const char *message)
